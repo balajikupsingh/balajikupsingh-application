@@ -1,0 +1,138 @@
+name: Playwright E2E Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # 1. Checkout the Application Repo (the one that triggered the workflow)
+      - name: Checkout Application Repo
+        uses: actions/checkout@v4
+        with:
+          path: application-repo
+
+      # 2. Checkout the Playwright Tests Repo
+      - name: Checkout Playwright Repo
+        uses: actions/checkout@v4
+        with:
+          repository: balajikupsingh/balajikupsingh-playwright
+          ref: main  # Always run against the main test suite
+          path: playwright-repo
+          # If the Playwright repo is private, you must provide a PAT here.
+          # token: ${{ secrets.CROSS_REPO_PAT }}
+
+      # 3. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 4. Install Playwright & Browsers
+      - name: Install Playwright Dependencies
+        working-directory: playwright-repo
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      # 5. Patch Application Config for CI (using scripts from the tester repo)
+      - name: Patch Application Config
+        run: |
+          if [ -d "application-repo/backend-app" ]; then
+            BACKEND_DIR="application-repo/backend-app"
+            FRONTEND_DIR="application-repo/frontend-app"
+          else
+            BACKEND_DIR="application-repo"
+            FRONTEND_DIR=""
+          fi
+          echo "BACKEND_DIR=$BACKEND_DIR" >> $GITHUB_ENV
+          echo "FRONTEND_DIR=$FRONTEND_DIR" >> $GITHUB_ENV
+
+          if [ -f "$BACKEND_DIR/models/index.js" ]; then
+            node playwright-repo/ci/patch-backend-ssl.js "$BACKEND_DIR/models/index.js" || true
+          fi
+          if [ -n "$FRONTEND_DIR" ] && [ -f "$FRONTEND_DIR/src/agent.js" ]; then
+            node playwright-repo/ci/patch-frontend-api-root.js "$FRONTEND_DIR/src/agent.js" || true
+          fi
+
+      # 6. Install Application Dependencies
+      - name: Install Application Dependencies
+        run: |
+          cd $BACKEND_DIR && npm ci
+          if [ -n "$FRONTEND_DIR" ]; then
+            cd ../../$FRONTEND_DIR && npm ci
+          fi
+
+      # 7. Start Application
+      - name: Start Application
+        env:
+          PORT: 3000
+          NODE_ENV: production
+          SECRET: 'ci-secret'
+          PGSSL: 'false'
+        run: |
+          cd $BACKEND_DIR
+          node app.js &
+          
+          if [ -n "$FRONTEND_DIR" ]; then
+            cd ../../$FRONTEND_DIR
+            export PORT=4100
+            export REACT_APP_API_ROOT="http://localhost:3000/api"
+            export CI=false
+            export BROWSER=none
+            npm start &
+          fi
+
+      # 8. Wait for Readiness
+      - name: Wait for Application Readiness
+        timeout-minutes: 5
+        run: |
+          echo "Waiting for backend on port 3000..."
+          for i in {1..60}; do
+            if curl -sf "http://localhost:3000/api/tags" > /dev/null 2>&1; then
+              echo "✅ Backend is ready!"
+              break
+            fi
+            sleep 5
+          done
+          
+          if [ -n "$FRONTEND_DIR" ]; then
+            echo "Waiting for frontend on port 4100..."
+            for i in {1..60}; do
+              if curl -sf "http://localhost:4100" > /dev/null 2>&1; then
+                echo "✅ Frontend is ready!"
+                break
+              fi
+              sleep 5
+            done
+          fi
+
+      # 9. Execute the Tests
+      - name: Run Playwright Tests
+        working-directory: playwright-repo
+        env:
+          CI: true
+          BASE_URL_API: "http://localhost:3000"
+          BASE_URL_WEB: "http://localhost:4100"
+        run: npx playwright test --reporter=github,html
+
+      # 10. Upload Results
+      - name: Upload Test Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-repo/playwright-report/
+          retention-days: 7
