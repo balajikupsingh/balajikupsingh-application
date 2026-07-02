@@ -32,7 +32,7 @@ jobs:
           ref: main  # Always run against the main test suite
           path: playwright-repo
           # If the Playwright repo is private, you must provide a PAT here.
-          # token: ${{ secrets.CROSS_REPO_PAT }}
+          token: ${{ secrets.CROSS_REPO_PAT }}
 
       # 3. Setup Node.js
       - name: Setup Node.js
