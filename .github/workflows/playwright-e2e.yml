@@ -70,9 +70,14 @@ jobs:
       # 6. Install Application Dependencies
       - name: Install Application Dependencies
         run: |
-          cd $BACKEND_DIR && npm ci
+          # Remove problematic preinstall script from backend to prevent infinite recursion
+          if [ -f "$BACKEND_DIR/package.json" ]; then
+            sed -i '/"preinstall":/d' "$BACKEND_DIR/package.json"
+          fi
+          
+          cd $BACKEND_DIR && npm install
           if [ -n "$FRONTEND_DIR" ]; then
-            cd ../../$FRONTEND_DIR && npm ci
+            cd ../../$FRONTEND_DIR && npm install
           fi
 
       # 7. Start Application
